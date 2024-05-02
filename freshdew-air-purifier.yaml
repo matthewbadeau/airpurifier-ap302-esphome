@@ -1,0 +1,240 @@
+# ESPHome config for Freshdew AP302 Air Purifier
+# This is also sold under the brand JOWSET
+
+# Significant influence from another Tuya air purifier config by wildekek
+# Reference https://github.com/wildekek/BlitzHome-BH-AP2501/
+# Some values were changed and extra options added for child lock, sleep mode, automatic mode, etc.
+
+substitutions:
+  device_name: "freshdew-air-purifier"
+  device_friendly_name: "Air Purifier"
+  device_description: "Freshdew AP302"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_friendly_name}
+  comment: ${device_description}
+  name_add_mac_suffix: false
+  on_boot:
+    priority: -100
+    then:
+      # Wait for the tuya startup to complete
+      - delay: 7s
+  project:
+    name: Freshdew.AP302
+    version: '1.0'
+
+esp8266:
+  board: esp01_1m
+
+# Enable logging
+logger:
+  level: INFO
+  logs: 
+    api: INFO
+    api.connection: INFO
+    api.service: INFO
+    api.socket: INFO
+    sensor: INFO
+  # Disable logging via UART, we need it for the Tuya MCU
+  baud_rate: 0
+
+# Enable Home Assistant API
+api:
+
+# Allow Over-The-Air updates
+ota:
+
+wifi:
+  # Set up a wifi access point
+  ap: {}
+
+# In combination with the `ap` this allows the user
+# to provision wifi credentials to the device via WiFi AP.
+captive_portal:
+
+dashboard_import:
+  package_import_url: github://esphome/example-configs/esphome-web/esp8266.yaml@main
+  import_full_config: true
+
+# To have a "next url" for improv serial
+web_server:
+
+uart:
+  rx_pin: GPIO3
+  tx_pin: GPIO1
+  baud_rate: 9600
+
+tuya:
+  id: tuya_mcu
+
+fan:
+  - platform: "tuya"
+    id: "tuya_fan"
+    name: "Fan"
+    switch_datapoint: 1
+    speed_datapoint: 4
+    speed_count: 4
+
+
+# Fan control logic
+output:
+  - platform: template
+    id: fan_output
+    type: float
+    write_action:
+      - lambda: |-
+              if (id(tuya_fan).state == 0) {
+                id(tuya_fan).turn_off();
+              }
+
+
+sensor:
+  # PM2.5 sensor
+  - platform: "tuya"
+    name: "PM2.5"
+    id: pm_25
+    sensor_datapoint: 2
+    device_class: PM25
+    unit_of_measurement: µg/m³
+    state_class: "measurement"
+    accuracy_decimals: 1
+
+  # PM2.5 sensor with smoothing
+  - platform: template
+    name: "PM2.5 Smoothed"
+    id: pm_25_filtered
+    device_class: PM25
+    unit_of_measurement: µg/m³
+    state_class: "measurement"
+    update_interval: 1s
+    lambda: return id(pm_25).state;
+    filters:
+      - median:
+          window_size: 4
+          send_every: 2
+          send_first_at: 2
+      # Remove 999 error spikes
+      #- filter_out: 999
+      # Filter outlier "1" values
+      #- quantile:
+      #    window_size: 5
+      #    send_every: 1
+      #    send_first_at: 1
+      #    quantile: .9
+      # Smooth out noise
+      - exponential_moving_average:
+          alpha: 0.05
+          send_every: 1
+          send_first_at: 1
+
+  # Filter utilization
+  - platform: "tuya"
+    name: "Filter remaining"
+    sensor_datapoint: 5
+    unit_of_measurement: "%"
+    icon: mdi:ticket-percent-outline
+    entity_category: diagnostic
+    filters:
+      - lambda: return 100-x;
+  # Countdown remaining
+  - platform: "tuya"
+    name: "Countdown Remaining"
+    sensor_datapoint: 19
+    device_class: duration
+    unit_of_measurement: "min"
+
+number:
+  # Set countdown timer
+  - platform: "tuya"
+    name: "Countdown"
+    number_datapoint: 18
+    unit_of_measurement: h
+    device_class: duration
+    min_value: 0
+    max_value: 24
+    step: 1
+
+switch:
+  # Filter reset
+  - platform: "tuya"
+    id: "filter_reset"
+    switch_datapoint: 11
+    internal: True
+  # Child lock
+  - platform: "tuya"
+    id: "child_lock"
+    switch_datapoint: 7
+    internal: True
+
+
+button:
+  # Button to reset filter cartridge
+  - platform: template
+    name: "Filter cartridge reset"
+    entity_category: diagnostic
+    icon: mdi:air-filter
+    on_press:
+      then:
+        - fan.turn_on: tuya_fan
+        - switch.turn_on: filter_reset
+        - delay: 1s
+        - switch.turn_off: filter_reset
+  # Child lock button
+  - platform: template
+    name: "Child lock"
+    icon: mdi:lock
+    on_press: 
+      then:
+        - switch.toggle: child_lock
+        - delay: 1s
+  # Auto mode
+  # Tasmota docs to the rescue: https://tasmota.github.io/docs/TuyaMCU/#air-purifier
+  - platform: template
+    name: "Auto mode"
+    id: auto_mode
+    icon: "mdi:auto-mode"
+    on_press:
+      - lambda: id(tuya_mcu).set_enum_datapoint_value(3, 0x01);
+      - delay: 1s
+  # Sleep mode
+  - platform: template
+    name: "Sleep mode"
+    id: sleep_mode
+    icon: "mdi:sleep"
+    on_press:
+      - lambda: id(tuya_mcu).set_enum_datapoint_value(3, 0x02);
+      - delay: 1s
+
+script:
+  # Determine which speeed the fan needs to run on based on the pm2.5
+  - id: auto_fan_speed
+    then:         
+      - if:
+          condition:
+            sensor.in_range:
+              id: pm_25_filtered
+              below: 20
+          then:
+            - fan.turn_on: 
+                id: tuya_fan
+                speed: 1
+      - if:
+          condition:
+            sensor.in_range:
+              id: pm_25_filtered
+              above: 30
+              below: 50
+          then:
+            - fan.turn_on: 
+                id: tuya_fan
+                speed: 2
+      - if:
+          condition:
+            sensor.in_range:
+              id: pm_25_filtered
+              above: 60
+          then:
+            - fan.turn_on: 
+                id: tuya_fan
+                speed: 3
