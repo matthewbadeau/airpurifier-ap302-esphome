@@ -40,3 +40,8 @@ Solder the ESP12F module into place and solder a 10K ohm resistor between pins G
 Reassemble!
 
 Remember to test everything works before putting the screws back into place!
+
+
+## In home assistant
+
+![Home Assistant screenshot](https://github.com/matthewbadeau/airpurifier-ap302-esphome/assets/641764/7a46ccda-8a50-4dde-91c3-54416ecde9ac)
